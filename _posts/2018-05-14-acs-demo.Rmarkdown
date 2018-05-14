@@ -1,0 +1,125 @@
+---
+layout: post
+title: Using ACS Data Directly From R
+date:   2018-05-14 10:18:00
+tags: R
+subclass: 'post tag-fiction'
+navigation: True
+logo: 'assets/images/ghost.png'
+cover: 'assets/images/cover1.jpg'
+author: hackz
+categories: hackz
+---
+
+This post goes over how to download and use Census and ACS data from within R using the `tidycensus` and `acs` packages. When possible I would suggest using the `tidycensus` package as the functions are much easier to work with and provide a cleaner output. The `tidycensus` package, unfortunately, does not cover the entirity of the census geographies and that is when we must use the `acs` package. They both access the same data so reults should not differ if you decide to use one package over another.
+
+```{r setup, warning=F, message=F}
+library(acs)
+library(jsonlite)
+library(stringr)
+library(knitr)
+library(DT)
+library(sf)
+library(tidycensus)
+library(tidyverse)
+
+
+# api key needs to be your own ACS api key!
+# you can get one here http://api.census.gov/data/key_signup.html
+apiKey <- read_json("~/Documents/PopDataDemo/keys/acs.json")
+census_api_key(apiKey)
+```
+
+### View Variables for a particular Census/5 year ACS using `tidycensus`
+
+Trying to figure out exactly what you want from the census data for any given year is probably the most tedious part of navigating the census and ACS data. There is a lot of information in there and the structure of it is not exactly intuitive. Lets say that you know that you want to look at the data from the 2014 five year ACS and you want to find household income data broken down by race. We can start by downloading the variable name sheet which has on the order of 10's of thousands of different variables and start navigating from there. I could search in the interactive table code below I can narrow my search results a bit by using "income race" in the search box, a working demo found [here](https://nmmarquez.twilightparadox.com/acs5censusDemo.html). For this demo I am going to use the `B19013` median household income variables.
+
+```{r searchingVariables, warning=F, message=F}
+v14acs <- load_variables(2014, "acs5", cache=T)
+
+## Search Interactively with this code
+# v14acs %>%
+#    datatable (style="bootstrap")
+
+v14acs %>%
+    filter(grepl("B19013", name)) %>%
+    as.data.frame %>%
+    head %>%
+    kable
+```
+
+In order to get those values for the household income data we need to build a vector of variables that we want from the acs that follow the naming structure mentioned above. We create it below and when we make the call to the ACS api using get acs we can say that we want these values at the county level with the geometries so we can map the data.
+
+```{r gettingData, warning=F, message=F}
+# the variables that I want in my download
+incomeVars <- paste0("B19013", c("", LETTERS[1:9]), "_001E")
+
+# downolad data the capture output stuff isnt neccesary its just to get rid
+# of the output
+t <- capture.output(rawIncomeDF <- get_acs(
+    geography="county", # I want county level data
+    variables=incomeVars, # iwant the variables from this list
+    year=2014, # from the 2014 acs
+    geometry=TRUE)) # I also want the geometry data for mapping later
+
+hispanicSPDF <- rawIncomeDF %>%  # take my sf structure
+    filter(variable == "B19013I_001") %>% # isolate hispanic income data
+    filter(endsWith(NAME, ", California")) %>% # only look at CA
+    st_zm %>% # remove the third dimension which is probably altitude
+    as("Spatial") # convert to spatial data frame
+
+hispanicSPDF$id <- row.names(hispanicSPDF) # add a new column id from row names
+
+hispanicSPDF %>%
+    fortify %>% # make a regular data frame thats plottable
+    left_join(hispanicSPDF@data) %>% # merge the original values back on
+    ggplot(aes(x=long, y=lat)) +
+    geom_polygon(aes(group=group, fill = estimate)) +
+    geom_path(aes(group=group), size=.1) +
+    scale_fill_distiller(palette = "Spectral", direction=1) +
+    theme_void() +
+    ggtitle("Hispanic Median Household Income")
+```
+
+The `tidy_census` package is great but it isnt comprehensive and sometimes we need to rely on the `acs` package which basically provides an R interface to ACS api. This allows us to acces geographies such as school districts. Below is a demo of using the `acs` package to pull some data and then we can plot the distribution of Hispanic Household Incomes by school district.
+
+```{r acsFetch, warning=F, message=F}
+# make the unified and secondary geographies seperatly
+schoolsCA <- list(
+    unified=geo.make(
+        state="CA",
+        school.district.unified="*"),
+    secondary=geo.make(
+        state="CA",
+        school.district.secondary="*")
+)
+
+# pull both data sets
+schoolResults <- lapply(schoolsCA, function(x){
+    acs.fetch(
+        endyear=2014,
+        span=5,
+        geography=x,
+        variable=str_sub(incomeVars, 1, -2),
+        key=apiKey)
+    }
+)
+
+# clean and merge them
+schoolIncomeDF <- bind_rows(
+    schoolResults$unified@estimate %>%
+        as.data.frame %>%
+        mutate(`School District`=row.names(.)),
+    schoolResults$secondary@estimate %>%
+        as.data.frame %>%
+        mutate(`School District`=row.names(.)))
+
+# pllot the log distribution
+schoolIncomeDF %>%
+    ggplot(aes(x=B19013I_001)) +
+    geom_density() +
+    theme_classic() +
+    xlab("Income in Dollars") +
+    ylab("Density") +
+    ggtitle("Hispanic Household Income Across California School Districts")
+```
