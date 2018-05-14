@@ -1,0 +1,140 @@
+---
+layout: post
+title: The Gibbs and MH Mix
+date:   2017-12-20 10:18:00
+tags: R Statistics
+subclass: 'post tag-fiction'
+navigation: True
+logo: 'assets/images/ghost.png'
+cover: 'assets/images/rainier-3.jpg'
+author: hackz
+categories: hackz
+---
+
+For any one who writes anything data science related there comes a time when they discover the ~~pain~~ joy of writing there own MCMC sampler from scratch and the inevitable need to tell everyone about it. For me, now is that time and after getting my butt kicked in my stochastic modeling class I fell like I need to at least write about the one thing that I did want to take away from the class and feel like I got a decent handle on.
+
+Lets imagine a scenario where we have a number of failures from a power plant and we want to estimate the relative risk of a failure per unit time. We are given ten data points that look something like this.
+
+$$
+\boldsymbol{Y}\text{:}~~5,~1,~5,~14,~3,~19,~1,~1,~4,~22 \\\
+\boldsymbol{T}\text{:}~~94.3,~15.7,~62.9,~126,~5.24,~31.4,~1.05,~1.05,~2.1,~10.5
+$$
+
+Where $Y$ is the number of observed incidents and $T$ is the amount of time that passed. We want to estimate $\boldsymbol{\theta}$ which is a vector of parameters for each time point such that the process of failures occurs with the distribution $Y_i \sim \text{Poisson}(\theta_i \times T_i)$. In order to get at this we can use some Bayesian inference to put priors on our thetas such that we assume that they come from a distribution such that $\theta_i \sim_{\text{iid}} \text{Gamma}(\alpha,\beta)$. The choice of the gamma prior is beneficial to us because it is a conjugate prior which leaves us with a posterior that is of the same distribution family as we will see later. But we don&#39;t want to leave everything up to the prior so we also want to through in hyper priors on $\alpha$ and $\beta$ and this is where things get a bit trickier. For now lets just say that we want the following hyper priors.
+
+$$
+\begin{align*}
+\alpha \sim \text{Exponential}(1) \\\
+\beta \sim \text{Gamma}(.1, 1)
+\end{align*}
+$$
+
+A full look at the $p(\alpha,\beta,\boldsymbol{\theta} | \mathbf{y})$ would then look something like this.
+
+$$
+\begin{align*}
+  p(\alpha, \beta, \boldsymbol{\theta} | \boldsymbol{y}) & \propto
+    p(\boldsymbol{y} | \alpha, \beta, \boldsymbol{\theta}) \times
+    p(\alpha, \beta, \boldsymbol{\theta}) \\\
+  p(\boldsymbol{y} | \alpha, \beta, \boldsymbol{\theta}) & =
+    \prod_{i=1} \frac{(t_i \theta_i)^{y_i} e^{-t_i \theta_i}}{y_i !} =
+    \prod_{i=1} \text{Pr}(y_i | \theta_i) \\\
+  p(\alpha, \beta, \boldsymbol{\theta}) & = \pi(\alpha, \beta)
+    \prod_{i=1} \frac{\beta^{\alpha} \theta_i^{\alpha - 1} e^{-b \theta_i}}
+                     {\Gamma(\alpha)} =
+    \prod_{i=1} \left\{ p(\theta_i| \alpha,\beta ) \right\} \times \pi(\alpha,\beta)
+\end{align*}
+$$
+
+Where $\pi(\alpha,\beta)$ is our prior distributions for $\alpha$ and $\beta$. This turns out to be the perfect time to use the Metropolis Hastings in Gibbs MCMC routine because we have a case where we have both conjugate priors and less well defined posterior. We already said that $\boldsymbol{\theta}$ has a conjugate prior but it turns out that so does $\beta$. The same is not true for $\alpha$ which ill show below with the derivation for our parameters of concern.
+
+$$
+\begin{align*}
+  p(\theta_i | \boldsymbol{\theta}_{-i},\alpha,\beta,\mathbf{y}) & \propto
+    \prod_{i=1} \frac{(t_i \theta_i)^{y_i} e^{-t_i \theta_i}}{y_i !}
+                \frac{\beta^{\alpha} \theta_i^{\alpha - 1} e^{-b \theta_i}}
+                     {\Gamma(\alpha)}  \\\
+    & \propto \text{Gamma}(y_i + \alpha, \beta + t_i) \\\
+    & \therefore ~~ \theta_i \perp \kern-5.5pt \perp \boldsymbol{\theta}_{-i},
+      \mathbf{y}_{-i} | y_i, \alpha, \beta \\\
+  p(\beta|\alpha,\boldsymbol{\theta},\mathbf{y}) & \propto
+    \left\{ \prod_{i=1} \beta^\alpha e^{-\beta \theta_i} \right\}
+    \Gamma(.1)^{-1} \beta^{-.9} e^{-\beta} \\\
+    & = \beta^{10a - .9}e^{-\beta(1 + \sum_{i=1} \theta_i)} \\\
+    & \propto \text{Gamma}(10\alpha + .1, 1 + \sum_{i=1} \theta_i) \\\
+    & \therefore ~~ \beta \perp \kern-5.5pt \perp \mathbf{y} | \boldsymbol{\theta}, \alpha \\\
+    p(\alpha|\beta,\boldsymbol{\theta},\mathbf{y}) & =
+      e^{-\alpha}\beta^{10 \alpha} \Gamma(\alpha)^{-10} \prod_{i=1} \theta_i^{\alpha - 1} \\\
+    & \therefore \alpha \perp \kern-5.5pt \perp \mathbf{y} | \boldsymbol{\theta} \beta
+\end{align*}
+$$
+
+So both the vector of $\boldsymbol{\theta}$ and the hyperparameter $\beta$ have nice gamma posteriors and we only need to worry about the string posterior for $\alpha$. What this means is we can use the Gibbs sampling approach for the two sets of parameters with conjugate priors and then do a Metropolis Hastings style sample for the alpha. This is much faster approach that gets us to the true posterior of our problem than if we had done Metropolis hastings for all the parameters. The algorithm is as follows.
+
+- Choose staring values for parameters $\boldsymbol{\theta}, \alpha, \beta$
+- Update values of $\theta_i$ using last iteration of $\alpha$ and $\beta$ with the distribution $\text{Gamma}(y_i + \alpha, \beta + t_i)$
+- Update $\beta$ using last iteration of $\alpha$ and current $\boldsymbol{\theta}$ with the distribution $\text{Gamma}(10 \alpha + 1, 1 + \sum_{i=1} \theta_i)$
+- Simulate a value $u$ which is distributed $\text{Uniform}(0,1)$
+- Propose a new value of $\alpha$, $\alpha^{\star}$, which is distributed $\mathcal{N}(\alpha, .2)$
+- Accept $\alpha^{\star}$ as the new $\alpha$ if $\alpha^{\star} > 0$ and $u < \frac{p(\alpha^{\star}|\beta,\boldsymbol{\theta})}{p(\alpha|\beta,\boldsymbol{\theta})}$
+- Repeat steps 2-6 1000000 times recording each new iteration of parameters $\boldsymbol{\theta}, \alpha, \beta$
+
+If we account for some burn in for the obviously terrible parameters we choose at the beginning then we should get something that looks decent. All this math is no fun unless we could do this in `R` so the post ends with that.
+
+```{r warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(MASS)
+library(RColorBrewer)
+set.seed(12345)
+
+Y <- c(5, 1, 5, 14, 3, 19, 1, 1, 4, 22)
+E <- c(94.3, 15.7, 62.9, 126, 5.24, 31.4, 1.05,  1.05,  2.1, 10.5)
+N <- length(Y)
+
+
+a0 <- 2 # hyperparamter alpha
+b0 <- 1 # hyperparamter beta
+curve(dgamma(x, a0, b0), 0, 10, main="Prior Distribution of lambda",
+      ylab="Density", xlab="")
+
+nchain <- 100000
+lambda.post <- matrix(1, nrow=N, ncol=nchain)
+b0.post <- rep(1, nchain)
+a0.post <- rep(2, nchain)
+burnin <- 10000
+ha <- .1
+hb <- 1
+
+proposalfunction <- function(param){
+    return(rnorm(1, mean=param, sd=.2))
+}
+
+for(i in 2:nchain){
+    lambda.post[,i] <- lambda <- rgamma(N, a0 + Y, b0 + E)
+    b0.post[i] <- b0 <- rgamma(1, N * a0 + ha, sum(lambda) + hb)
+
+    astar <- proposalfunction(a0)
+    # generate a probability of accepting that is g(p*)/g(pi)
+    paccept <- prod(lambda)^(astar-a0) * b0^(N * (astar-a0)) *
+        (gamma(astar)/gamma(a0))^-N * exp(-astar+a0)
+    if (astar > 0 & runif(1) < paccept){
+        a0 <- astar
+    }
+    a0.post[i] <- a0
+}
+
+qplot(b0.post[burnin:nchain], binwidth=.1, main="Posterior of Beta", xlab="")
+
+qplot(a0.post[burnin:nchain], binwidth=.1, main="Posterior of Alpha", xlab="")
+
+k <- 11
+my.cols <- rev(brewer.pal(k, "RdYlBu"))
+
+z <- kde2d(a0.post[burnin:nchain], b0.post[burnin:nchain], n=50)
+
+plot(a0.post[burnin:nchain], b0.post[burnin:nchain],
+     xlab=expression(alpha),  ylab=expression(beta), pch=19, cex=.4,
+     main="Bivariate Posterior of Hyperparameters")
+contour(z, drawlabels=FALSE, nlevels=k, col=my.cols, add=TRUE)
+```

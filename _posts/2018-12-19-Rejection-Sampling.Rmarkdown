@@ -1,0 +1,70 @@
+---
+layout: post
+title: Rejection Sampling
+date:   2017-12-19 10:18:00
+tags: R Simulation
+subclass: 'post tag-fiction'
+navigation: True
+logo: 'assets/images/ghost.png'
+cover: 'assets/images/cover1.jpg'
+author: hackz
+categories: hackz
+---
+
+Rejection sampling allows us to sample from some target distribution when we have a proposal distribution. The algorithm works by first drawing a random value, say $u$, that is between zero and one from uniform ($U(0,1)$) distribution. Next a random value for $x$ is drawn from the proposal distribution $f(x)$. Finally there is an acceptance/rejection step that asks: if the probability $u$ is less than the density of $g(x)$ at $x$ divided by the density of $f(x)*p_A$ then we'll accept $x$ as having been drawn from $g(x)$. If not well sample another value for $x$ from $f(x)$ and try again.
+
+For this example we will use a cauchy distribution as our proposal distribution, with density $\frac{1}{\pi (1 + x^2)}$, in order to get at our desired distribution the standard normal. In the `r` code we use an optimizer to solve for the value $p_A$ which is the acceptance probability and is the inverse of $\frac{f}{g}(x_M)$ where $x_M$ is the value of $x$ which gives the local minimum. In this case we can solve for $M$ analytically but lets do it both ways to show that we do indeed get the same answer.
+
+$$
+\begin{align*}
+  f(x) & = \frac{1}{\sqrt{2 \pi}} \text{exp} \Big( - \frac{x^2}{2} \Big) \\\
+  g(x) & = \frac{1}{\pi (1+x^2)} \\\
+  \frac{f}{g}(x) & = \frac{\pi (1+x^2) \text{exp} \big( - \frac{x^2}{2} \big)}
+                    {\sqrt{2 \pi}} \\\
+  \frac{d}{dx} & = \frac{\pi}{\sqrt{2 \pi}}
+                   - \text{exp} \Big( - \frac{x^2}{2}\Big) x (x^2 - 1) \\\
+  \text{set } \frac{d}{dx} \text{ to } 0 \text{ to find } x_M \text{&hellip;} \\\
+  x_M & = \pm 1 \\\
+  M & = \frac{2 \pi}{\sqrt{2 \pi}} \exp \Big( \frac{-1}{2} \Big) \approx 1.52 \\\
+  p_a & = \frac{\int_{-\infty}^{\infty} f(x)}{M} = M^{-1} \approx .66 \\\
+  \text{Expected number of trails is then} \\\
+  E[X] & = p(X \geq 1) + p(X \geq 2) + p(X \geq 3) + \dots \\\
+  & = 1 + (1 - p_a) + (1 - p_a)^2 + \dots \\\
+  & = \frac{1}{p_a} = M
+\end{align*}
+$$
+
+```{r}
+library(dplyr)
+set.seed(12345)
+
+
+# Rejection sampler
+
+fxdivgx <- function(x, inv=T){
+    dens <- (pi * (1 + x^2) * exp(x^2/-2))/sqrt(2 * pi)
+    dens <- ifelse(inv, dens^-1, dens)
+    return(dens)
+}
+
+optval <- optimize(fxdivgx, lower=0, upper=10)
+
+tdens <- function(x){dnorm(x, 0, 1)}
+pdens <- function(x){dcauchy(x, 0, 1)}
+prgen <- function(N){rcauchy(N, 0, 1)}
+curve(tdens(x), -3, 3, ylim=c(0, .8))
+curve(pdens(x), -3, 3, add=T, col="red")
+
+N <- 1000000
+M <- fxdivgx(optval$minimum, F)
+sampled <- data.frame(proposal=rcauchy(N, 0, 1)) %>%
+    mutate(targetDensity=tdens(proposal), proposalDensity=pdens(proposal)) %>%
+    mutate(accepted=ifelse(runif(N) < targetDensity / proposalDensity / M, T, F))
+
+hist(sampled$proposal[sampled$accepted], freq = F, col = "grey", breaks = 100)
+curve(tdens(x), -3, 3, add =T, col = "red")
+
+all.equal(mean(sampled$accepted), M^-1)
+
+M^-1
+```
