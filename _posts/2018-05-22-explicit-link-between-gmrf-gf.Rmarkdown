@@ -1,0 +1,198 @@
+---
+layout: post
+title: Explicit Link Between GMRF to GF (Part 1)
+date:   2018-05-22 10:18:00
+tags: R
+subclass: 'post tag-fiction'
+navigation: True
+logo: 'assets/images/ghost.png'
+cover: 'assets/images/leaf.jpg'
+author: hackz
+categories: hackz
+---
+
+This is largely a write up describing the main results of a foundational paper in geostatistics "An explicit link between Gaussian fields and Gaussian Markov random fields: the stochastic partial differential equation approach" by Lindgren, Rue, and Lindstrom. It also demos how to make use the findings in the paper in R and vizualize the results. This is especially applicable for cases when you have spatial point data that is unevenly spaced.
+
+## Introduction
+
+```{r libs, message=FALSE, warning=FALSE}
+library(dplyr)
+library(mvtnorm)
+library(Matrix)
+library(parallel)
+library(ar.matrix) # devtools::install_github("nmmarquez/ar.matrix")
+library(ggplot2)
+library(INLA)
+```
+
+In the field of spatial statistics we often want to estimate the degree of auto-correlation that exists in some phenomena or in the residuals of a particular linear model. Let us assume that we have some process $S(x)$ which operates over a $\mathbb{R}^2$ spatial field, such that $x_i \in \mathbb{R}^2 for i \in \{ 1, \dots n \}$. We then have some value $y_i$ which geographically correspond to values of $x_i$. If we define distance between two points i and j such that $d = ||x_i - x_j||$ we can then declare a function $k$ which defines the covariance between two points which is only dependent on the euclidean distance between those two points. This covariance function is the key element that we will need in order to construct a Gaussian Process. The other is a mean function which for now we will only consider a constant mean function of zero. Our gaussian process is the defined by $\mathcal{GP}(0, k)$. For a finite number of points, n, the covariance function $k$ produces a matrix $\sigma$ which is n by n and the stochastic process is then analogous to the Multivariate Normal Distribution such that $\text{MVN}(\boldsymbol{0}, \Sigma)$. In order for $\Sigma$ to be a valid covariance function we need to ensure that it is 1) symmetric and 2) positive semi definite. If we use the definition above then for any two points $x_i$ and $x_j$ the covariance only depends on the euclidean distance then the matrix $\Sigma$ must be symmetric by definition. In order to prove that a matrix is stationary, that is $z^T \Sigma z$ is positive for every construction of non zero set z we only have to show that all its eigenvalues are positive. On the other hand in order to prove that $k$ always produces a matrix $\Sigma$ for a finite set of points that is semi positive definite, then we need to use Bochner's theorem which states that a complex function k on $\mathbb{R}^D$ is the covariance function of a stationary mean square continuous complex valued random process on $\mathbb{R}^D$ if and only if it can be represented as
+
+$$
+k(d) = \int \text{exp}(2 \pi i s d) ~d \mu (s)
+$$
+
+## The Matern Covariance Function
+In their paper "An explicit link between Gaussian fields and Gaussian Markov random fields: The SPDE approach", Lindgren, Rue, and Lindstrom demonstrate how the gaussian field, a two dimensional gaussian process that is continuously indexed, can be estimated by a gaussian markov random field, a discretely indexed process whose construction is sparse in nature, most indexes are conditionally independent from each other, if the gaussian process has a matern covariance function. The benefits of this process is that if we are fitting a model that that has the form $\text{MVN}(\boldsymbol{0}, \Sigma)$ the operation of order is $\mathcal{O}(n^3)$. In contrast if we have a sparse precision matrix, $\Sigma^{-1}$, the time to calculate the likelihood has an operation of order of $\mathcal{O}(n^{\frac{3}{2}})$. The matern covariance function is defined as stated below
+
+$$
+k_\nu(d) = \frac{2^{1-\nu}}{\Gamma (\nu)} \Big( \sqrt{2 \nu} \frac{d}{\kappa}\Big)
+                  K_\nu \Big( \sqrt{2 \nu} \frac{d}{\kappa}\Big)
+$$
+
+Where $\Gamma$ is the Gamma function and $K_\nu$ is the modified Bessel function of the second kind.
+
+Several authors, such as Bertil Matern and Rasmussen and Williams, have shown that the Matern covariance function is indeed positive semi definite and we can show by simulation that the eigenvalues that are generated from various simulated random points on a field where $\kappa$ varies between 1 and 0 and $\nu$ is fixed to 2.  
+
+```{r simulatePSD}
+maternCor <- function(distX, kappa_, nu_=1){
+    t3 <- besselK(kappa_ * distX, nu_)
+    t2 <- (kappa_ * distX)^nu_
+    t1 <- (2)^(1-nu_)/gamma(nu_)
+    return(t1 * t2 * t3)
+}
+
+checkMaternEigen <- function(n=100){
+    points <- sapply(1:2, function(x) runif(n, 0, 100))
+    distMat <- sapply(1:n, function(i) sapply(1:n, function(j){
+        c(dist(rbind(points[i,], points[j,])))})) %>%
+        maternCor(kappa_=runif(1), nu=2)
+    diag(distMat) <- 1
+    all(eigen(distMat)$values >= 0)
+}
+
+# Run 500 simulations of 100 simulated points with
+# random values of kappa for each simulation and check if the
+# corresponding Covariance matrix that is created generates
+# all positive eigenvalues. nu is locked at 1
+
+set.seed(123)
+mclapply(rep(100, 5), checkMaternEigen, mc.cores=6) %>%
+    unlist %>%
+    all
+```
+
+## Main Finding 1
+
+Lindgren, Rue, and Lindstrom and have two main findings from their study. The fist finding is that on an evenly spaced two dimensional grid tending towards an infinite amount of points a gaussian process with a matern covariance function can be represented as a Gaussian Markov random field. The authors show that when the following statements are true
+
+$$
+E[x_{ij} | x_{-ij}] = a^{-1} (x_{i-1,j} + x_{i+1,j} + x_{i,j-1} + x_{i,j+1}) \\ \text{Var}(x_{ij} | x_{-ij}) = a^{-1}
+$$
+
+The corresponding covariance of any two points in the field can be expressed as
+
+$$
+\text{Cov}(x_{i,j},x_{i',j'}) \approx \frac{a}{2 \pi}
+     K_0(||x_{i,j} - x_{i',j'}||\sqrt{a-4})
+$$
+
+And the precision is thus
+
+$$
+\begin{bmatrix}
+-1 & \\\
+a & -1 \\\
+\end{bmatrix}
+$$
+
+This result is the natural interpretation of the Matern covariance when $\nu$ approaches zero and $\kappa = a - 4$. Because of the way $\alpha$ is constructed, $\alpha = \nu + \frac{D}{2}$ where $D$ is the number of dimensions of the field, in our case 2. The approximate precisions that accompany Gaussian processes with values of $\nu = 1, 2$ are shown as convolutions of the $\nu = 0$ case.
+
+$$
+\nu=1;\begin{bmatrix}
+1   &    & \\\
+-2a & 2  & \\\
+4+a^2 & -2a & 1
+\end{bmatrix} \\\
+$$
+$$
+\nu=2;\begin{bmatrix}
+-1   &    &    &  \\\
+3a   & -3 &    &  \\\
+-3(a^2 + 3) & 6a & -3 & \\\
+a(a^2 + 12) & -3(a^2 + 3) & 3a & -1
+\end{bmatrix} \\\
+$$
+
+Below we show that the approximations of a Matern Covariance Gaussian Process by use of the specified precision matrix for values of $\nu = \{ 1, 2 \}$ are indeed good fits by visual inspection of covariance and precision matrices created explicitly by the Matern Covariance function and the SPDE approximation.
+
+```{r maternApproximation, warning=F, message=F}
+buildQv1 <- function(gridDim, kappa=.3, verbose=F, sparse=F){
+    gridN <- gridDim^2
+    matrixPos <- expand.grid(x=1:gridDim, y=1:gridDim) %>%
+        mutate(Qpos=1:gridN)
+    gridQ <- matrix(0, nrow=gridN, ncol=gridN)
+    a_ <- kappa^2 + 4
+    
+    for(i in 1:gridN){
+        if(verbose){
+            print(i)
+        }
+        diagPos <- subset(matrixPos, Qpos==i)
+        pos_ <- c(diagPos$x, diagPos$y)
+        gridQ[i, i] <- 4 + a_^2
+        for(j in list(c(1,0), c(0,1), c(-1,0), c(0,-1))){
+            adj_pos <- pos_ + j
+            if(all(adj_pos > 0) & all(adj_pos <= gridN)){
+                Qpos2 <- subset(matrixPos, x==adj_pos[1] & y==adj_pos[2])$Qpos
+                gridQ[i, Qpos2] <- -2 * a_
+                gridQ[Qpos2, i] <- -2 * a_
+            }
+        }
+        for(j in list(c(1,1), c(-1,1), c(-1,-1), c(1,-1))){
+            adj_pos <- pos_ + j
+            if(all(adj_pos > 0) & all(adj_pos <= gridN)){
+                Qpos2 <- subset(matrixPos, x==adj_pos[1] & y==adj_pos[2])$Qpos
+                gridQ[i, Qpos2] <- 2
+                gridQ[Qpos2, i] <- 2
+            }
+        }
+        for(j in list(c(2,0), c(0,2), c(-2,0), c(0,-2))){
+            adj_pos <- pos_ + j
+            if(all(adj_pos > 0) & all(adj_pos <= gridN)){
+                Qpos2 <- subset(matrixPos, x==adj_pos[1] & y==adj_pos[2])$Qpos
+                gridQ[i, Qpos2] <- 1
+                gridQ[Qpos2, i] <- 1
+            }
+        }
+    }
+    if(sparse){
+        gridQ <- Matrix(gridQ, sparse=TRUE)
+    }
+    return(gridQ)
+}
+
+createDistGrid <- function(gridDim){
+    gridN <- gridDim^2
+    matrixPos <- expand.grid(x=1:gridDim, y=1:gridDim) %>%
+        mutate(Qpos=1:gridN)
+    gridSigma <- matrix(0, nrow=gridN, ncol=gridN)
+    for(i in 1:gridN){
+        for(j in i:gridN){
+            p1 <- subset(matrixPos, Qpos == i)
+            p2 <- subset(matrixPos, Qpos == j)
+            dist_ <- c(dist(rbind(c(p1$x, p1$y), c(p2$x, p2$y))))
+            gridSigma[i,j] <- dist_
+            gridSigma[j,i] <- dist_
+        }
+    }
+    return(gridSigma)
+}
+
+buildSigma <- function(gridDim, kappa=.3, nu_=1){
+    gridSigma <- createDistGrid(gridDim)
+    gridSigma <- maternCor(gridSigma, kappa, nu_=nu_)
+    diag(gridSigma) <- rep(1, gridDim^2)
+    return(gridSigma)
+}
+
+image(buildSigma(10, kappa=.9),
+      main="Exact Matern Covariance(nu=1)")
+image(solve(buildQv1(10, kappa=.9)),
+      main="GMRF approximation of Matern Covariance(nu=1)")
+image(solve(buildSigma(10, kappa=.9)),
+      main="Exact Matern Precision(nu=1)")
+image(buildQv1(10, kappa=.9),
+      main="GMRF approximation of Matern Precision(nu=1)")
+```
+
+While this result is defintely a worthwhile find, we most often find that are geospatial data is not evenly spaced on a grid so the use case of this methodology is limited. That is until we dig into the main finding 2 in the next post.

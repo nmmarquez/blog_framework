@@ -60,7 +60,7 @@ t <- capture.output(rawIncomeDF <- get_acs(
     geography="county", # I want county level data
     variables=incomeVars, # iwant the variables from this list
     year=2014, # from the 2014 acs
-    geometry=TRUE)) # I also want the geometry data for mapping later
+    geometry=TRUE, cache=T)) # I also want the geometry data for mapping later
 
 hispanicSPDF <- rawIncomeDF %>%  # take my sf structure
     filter(variable == "B19013I_001") %>% # isolate hispanic income data
