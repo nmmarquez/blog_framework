@@ -1,0 +1,188 @@
+---
+layout: post
+title: Explicit Link Between GMRF to GF (Part 2)
+date:   2018-05-23 10:18:00
+tags: R
+subclass: 'post tag-fiction'
+navigation: True
+logo: 'assets/images/ghost.png'
+cover: 'assets/images/leaf.jpg'
+author: hackz
+categories: hackz
+---
+
+This is a continuation of the write up describing the main results of a foundational paper in geostatistics "An explicit link between Gaussian fields and Gaussian Markov random fields: the stochastic partial differential equation approach" by Lindgren, Rue, and Lindstrom. It also demos how to make use the findings in the paper in R and vizualize the results. See the first post [here](https://nmmarquez.github.io/explicit-link-between-gmrf-gf).
+
+## Main Finding 2
+
+```{r libs, message=FALSE, warning=FALSE}
+library(dplyr)
+library(mvtnorm)
+library(Matrix)
+library(parallel)
+library(ar.matrix) # devtools::install_github("nmmarquez/ar.matrix")
+library(ggplot2)
+library(INLA)
+
+# Calculate Matern Covariance based on distance
+maternCor <- function(distX, kappa_, nu_=1){
+    t3 <- besselK(kappa_ * distX, nu_)
+    t2 <- (kappa_ * distX)^nu_
+    t1 <- (2)^(1-nu_)/gamma(nu_)
+    return(t1 * t2 * t3)
+}
+```
+
+The second main finding of the paper states that in addition to being able to approximate a matern gaussian process on regular two dimensional lattice field, we can also approximate a matern covariance gaussian process on an irregular field using triangulation methods such as Delaunay Triangulation. For any triangulation the stochastic weak formulation of the SPDE is defined as
+
+$$
+[f,g] = \int f(u)g(u) du
+$$
+
+Where the integral is over the are of the triangulation. The stochastic solution to this eqautaion is found by
+
+$$
+\Big{\{} \langle \phi_j, (\kappa^2 - \Delta)^{\alpha / 2} \rangle, j=1, \dots , m \Big{\}} \overset{d}{=}
+    \Big{\{} \langle \phi_j , \mathcal{W} \rangle, j, \dots, m \Big{\}}
+$$
+
+Where $\overset{d}{=}$ indicates equally distributed and $\{ \phi_j(u), j=1, \dots , m \}$ are a finite set of appropriate test functions. The finite element representation of the solution can then be viewed as
+
+$$
+x(u) = \sum_{k=1}^{n} \psi_k (u) w_k
+$$
+
+Where $\psi_k$ are piecewise linear basis functions and $w_k$ are gaussian weights. The benefit of this approach is that we can define any point on the field as a function of its relationship to their points which it shares a border with and the point on the vertex corresponds to a weight of 1 when the full field is observed. Furthermore points that lie within the triangulation are weighted sum of the vertices that define the triangulation that a point lies within. The solutions for $\alpha =1$ and $\alpha =2$ are $\phi_k = (kappa^2 - \Delta)^{1/2} \psi_k$ and $\phi_k = \psi_k$ respectively. Furthermore, solutions for $\alpha$ greater than 2 can be formulated as products of the formulations of $\alpha=1$ and $\alpha=2$
+
+$$
+C_{ij} = \langle \psi_i, \psi_j \rangle\\\
+G_{ij} = \langle \nabla \psi_i , \nabla \psi_j \rangle \\\
+K_{\kappa^2} = \kappa^2 C_{ij} + G_{ij}
+$$
+
+$$
+Q_{1,\kappa^2} = K_{\kappa^2} \\\
+Q_{2,\kappa^2} = K_{\kappa^2} C^{-1} K_{\kappa^2} \\\
+Q_{\alpha,\kappa^2} = K_{\kappa^2} C^{-1} Q_{\alpha -2, \kappa^2}C^{-1} K_{\kappa^2} \text{, for } \alpha = 3, 4, \dots
+$$
+
+It should be noted that $C^{-1}$ is dense, however it can be approximated by $\widetilde{C}^{-1}$ where $\widetilde{C}$ is a diagnoal matrix with diagnol elements $\widetilde{C}_{ii} = \langle \psi_i, 1 \rangle$
+
+To show that this estimation is a good approximation we show heat maps of covariance and precision matrices created by the Matern Covariance function and the SPDE approximation.
+
+```{r irregMats}
+set.seed(123)
+n <- 100
+# the spatial range of the correlation function
+kappa_ <- .3
+# randomly simulated points in space not a grid
+points <- sapply(1:2, function(x) runif(n, 0, 100))
+# calculate distances between all points
+# convert distance to matern correlation
+distMat <- sapply(1:n, function(i) sapply(1:n, function(j){
+    c(dist(rbind(points[i,], points[j,])))})) %>%
+    maternCor(kappa_=kappa_, nu=1)
+diag(distMat) <- 1
+
+# do an approximation to the matern covariance
+mesh <-  points %>% inla.mesh.create
+fmesh <- inla.fmesher.smorg(mesh$loc, mesh$graph$tv, fem = 2,
+                            output = list("c0", "c1", "g1", "g2"))
+M0 <- fmesh$c0
+M1 <- fmesh$g1
+M2 <- fmesh$g2
+Q <- as.matrix((kappa_^4)*M0 + 2*(kappa_^2) * M1 + M2)
+
+image(distMat,
+      main="Exact Matern Covariance(nu=1)")
+image(solve(Q)[1:100, 1:100],
+      main="GMRF approximation of Matern Covariance(nu=1)")
+image(solve(distMat),
+      main="Exact Matern Precision(nu=1)")
+image(Q[1:100, 1:100],
+      main="GMRF approximation of Matern Precision(nu=1)")
+```
+
+We can also verify that the distance correlation behavior, for both the Matern Covariance and the approximation resemble each other.
+
+```{r corrExamine}
+invQ <- solve(Q)
+pointsDF <- data.frame(posi=vector("integer"), posj=vector("integer")) %>%
+    mutate(MaternCor=vector("numeric"), spdeCor=vector("numeric"))
+
+pointsDF <- bind_rows(lapply(1:n, function(i) bind_rows(lapply(i:n, function(j){
+    dist_ <- c(dist(rbind(points[i,], points[j,])))
+    mCor <- maternCor(dist_, kappa_=kappa_, nu_ = 1)
+    mCor <- ifelse(is.na(mCor), 1, mCor)
+    pCor <- invQ[i,j] / sqrt(invQ[i,i] * invQ[i,i])
+    data.frame(posi=i, posj=j, maternCor=mCor, spdeCor=pCor, dist=dist_)
+    }))))
+
+pointsDF %>%
+    mutate(intv=cut_interval(dist, length=1)) %>%
+    group_by(intv) %>%
+    summarize(mCor=mean(maternCor), pCor=mean(spdeCor)) %>%
+    head(n=20) %>%
+    mutate(Distance=seq(0, 19, 1)) %>%
+    ggplot(data=.) +
+    geom_line(aes(x=Distance, y=mCor)) +
+    geom_point(aes(x=Distance, y=pCor)) +
+    labs(x="Distance", y="Correlation",
+         title="Matern(Line) and SPDE(Points) Correlation") +
+    theme_classic()
+
+```
+
+With the precision matrix Q generated by the SPDE approximation we can then use cholesky decompositions and simulate values for the irregular points as well as use interpolation to estimate the continuous surface.
+
+```{r simIrreg}
+m <- 60
+
+pointsDF <- data.frame(x=runif(m^2,0, m), y=runif(m^2,0, m))
+
+buildIrregQ <- function(pointsDF, kappa_=.3, nu_=2, sparse=TRUE){
+    mesh <-  pointsDF %>%
+        as.matrix %>%
+        inla.mesh.create
+    fmesh <- inla.fmesher.smorg(mesh$loc, mesh$graph$tv, fem = 2,
+                                output = list("c0", "c1", "g1", "g2"))
+    M0 <- fmesh$c0
+    M1 <- fmesh$g1
+    M2 <- fmesh$g2
+    Q <- as.matrix((kappa_^4)*M0 + 2*(kappa_^2) * M1 + M2)
+    if(sparse){
+        Q <- Matrix(Q, sparse=TRUE)
+    }
+    return(Q)
+}
+
+irregQ <- buildIrregQ(pointsDF, kappa_ = .1, sparse=T)
+simX <- c(sim.AR(1, irregQ))
+
+pointsDF %>%
+    mutate(val_=simX[1:(m^2)]) %>%
+    ggplot(aes(x=x, y=y, color=val_)) +
+    scale_color_distiller(palette = "Spectral") +
+    geom_point(size=2) +
+    labs(x="", y="", title="Points Simulated with v=1") +
+    theme_void()
+
+# use linear interpolation to project onto the full space
+proj <- pointsDF %>%
+    as.matrix %>%
+    inla.mesh.create %>%
+    inla.mesh.projector(dims=c(500,500))
+
+pointsDF %>%
+    as.matrix %>%
+    inla.mesh.create %>%
+    plot(main="Delaunay Triangulation Of Points")
+
+data.frame(x=proj$lattice$loc[,1],
+           y=proj$lattice$loc[,2]) %>%
+    mutate(z=c(inla.mesh.project(proj, field=simX))) %>%
+    ggplot(aes(x, y, z=z)) + geom_raster(aes(fill = z)) + theme_bw() +
+    lims(y=c(0,m), x=c(0,m)) +
+    scale_fill_distiller(palette = "Spectral") +
+    theme_void() + labs(title="Triangulated Interpolation")
+```

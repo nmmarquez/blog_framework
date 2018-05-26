@@ -20,7 +20,8 @@ library(dplyr)
 library(mvtnorm)
 library(Matrix)
 library(parallel)
-library(ar.matrix) # devtools::install_github("nmmarquez/ar.matrix")
+# devtools::install_github("nmmarquez/ar.matrix")
+library(ar.matrix)
 library(ggplot2)
 library(INLA)
 ```
@@ -41,9 +42,10 @@ $$
 
 Where $\Gamma$ is the Gamma function and $K_\nu$ is the modified Bessel function of the second kind.
 
-Several authors, such as Bertil Matern and Rasmussen and Williams, have shown that the Matern covariance function is indeed positive semi definite and we can show by simulation that the eigenvalues that are generated from various simulated random points on a field where $\kappa$ varies between 1 and 0 and $\nu$ is fixed to 2.  
+Several authors, such as Bertil Matern and Rasmussen and Williams, have shown that the Matern covariance function is indeed positive semi definite and we can show by simulation that the eigenvalues that are generated are indeed positive from various simulated random points on a field where $\kappa$ varies between 0 and 1 and $\nu$ is fixed to 2.
 
 ```{r simulatePSD}
+# Calculate Matern Covariance based on distance
 maternCor <- function(distX, kappa_, nu_=1){
     t3 <- besselK(kappa_ * distX, nu_)
     t2 <- (kappa_ * distX)^nu_
@@ -51,6 +53,7 @@ maternCor <- function(distX, kappa_, nu_=1){
     return(t1 * t2 * t3)
 }
 
+# see if
 checkMaternEigen <- function(n=100){
     points <- sapply(1:2, function(x) runif(n, 0, 100))
     distMat <- sapply(1:n, function(i) sapply(1:n, function(j){
@@ -63,7 +66,7 @@ checkMaternEigen <- function(n=100){
 # Run 500 simulations of 100 simulated points with
 # random values of kappa for each simulation and check if the
 # corresponding Covariance matrix that is created generates
-# all positive eigenvalues. nu is locked at 1
+# all positive eigenvalues. nu is locked at 2
 
 set.seed(123)
 mclapply(rep(100, 5), checkMaternEigen, mc.cores=6) %>%
@@ -113,16 +116,18 @@ a(a^2 + 12) & -3(a^2 + 3) & 3a & -1
 \end{bmatrix} \\\
 $$
 
-Below we show that the approximations of a Matern Covariance Gaussian Process by use of the specified precision matrix for values of $\nu = \{ 1, 2 \}$ are indeed good fits by visual inspection of covariance and precision matrices created explicitly by the Matern Covariance function and the SPDE approximation.
+Below we show that the approximations of a Matern Covariance Gaussian Process by use of the specified precision matrix when $\nu =  1$ are indeed good fits by visual inspection of covariance and precision matrices created explicitly by the Matern Covariance function and the SPDE approximation.
 
 ```{r maternApproximation, warning=F, message=F}
+# Generate matern precision approximation
+# based on paper
 buildQv1 <- function(gridDim, kappa=.3, verbose=F, sparse=F){
     gridN <- gridDim^2
     matrixPos <- expand.grid(x=1:gridDim, y=1:gridDim) %>%
         mutate(Qpos=1:gridN)
     gridQ <- matrix(0, nrow=gridN, ncol=gridN)
     a_ <- kappa^2 + 4
-    
+
     for(i in 1:gridN){
         if(verbose){
             print(i)
@@ -161,6 +166,7 @@ buildQv1 <- function(gridDim, kappa=.3, verbose=F, sparse=F){
     return(gridQ)
 }
 
+# distance grid
 createDistGrid <- function(gridDim){
     gridN <- gridDim^2
     matrixPos <- expand.grid(x=1:gridDim, y=1:gridDim) %>%
@@ -178,6 +184,7 @@ createDistGrid <- function(gridDim){
     return(gridSigma)
 }
 
+# exact covariance matrix
 buildSigma <- function(gridDim, kappa=.3, nu_=1){
     gridSigma <- createDistGrid(gridDim)
     gridSigma <- maternCor(gridSigma, kappa, nu_=nu_)
